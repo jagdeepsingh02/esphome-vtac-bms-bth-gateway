@@ -1,0 +1,1638 @@
+esphome:
+  name: vtac_batteries_bth_gateway
+  friendly_name: VTAC Batteries Bluetooth Gateway
+  
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    advanced:
+      sram1_as_iram: true
+      minimum_chip_revision: "3.0"
+
+# Keep verbose logging so we can see the Service Discovery!
+logger:
+  level: DEBUG
+
+globals:
+  - id: fast_poll_timer
+    type: float
+    initial_value: '0'
+  - id: slow_poll_timer
+    type: float
+    initial_value: '0'
+  - id: current_batt_id
+    type: int
+    initial_value: '1'
+  - id: fast_script_start_time
+    type: uint32_t
+    initial_value: '0'
+  - id: slow_script_start_time
+    type: uint32_t
+    initial_value: '0'
+  - id: fast_actual_execution_time
+    type: float
+    initial_value: '0'
+  - id: slow_actual_execution_time
+    type: float
+    initial_value: '0'
+
+number:
+  - platform: template
+    name: "Fast Polling Interval"
+    id: fast_poll_interval
+    min_value: 0.1
+    max_value: 60.0
+    step: 0.1
+    initial_value: 5
+    unit_of_measurement: "s"
+    mode: box
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    name: "Slow Polling Interval"
+    id: slow_poll_interval
+    min_value: 10
+    max_value: 3600
+    step: 5
+    initial_value: 60
+    unit_of_measurement: "s"
+    mode: box
+    optimistic: true
+    restore_value: true
+    entity_category: config
+
+  - platform: template
+    name: "Slave Count"
+    id: slave_count
+    min_value: 0
+    max_value: 2
+    step: 1
+    initial_value: 2
+    unit_of_measurement: "Slaves"
+    mode: box
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    
+web_server:
+  port: 80
+  
+api:
+  max_connections: 1
+  encryption:
+    key: !secret vtac_batteries_bth_gateway__encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: !secret emgy_AP
+    password: !secret emgy_AP_Password
+
+captive_portal:
+
+binary_sensor:
+  - platform: template
+    name: "Master Battery Connected"
+    id: battery_connected
+    entity_category: diagnostic
+
+# --- THE MAGIC SAUCE ---
+esp32_ble_tracker:
+
+# Remove includes from top of file if you put them there
+
+ble_client:
+  - mac_address: !secret vtac_batteries_bth_gateway__MasterBatteryMAC
+    id: ble
+# We write directly to the BLE characteristic to ask for data!
+    on_connect:
+      then:
+        - logger.log: "Connected! Battery will likely spam 0D config first..."
+        - binary_sensor.template.publish:
+            id: battery_connected
+            state: ON
+    on_disconnect:
+      then:
+        - logger.log: "Disconnected from Battery!"
+        - script.stop: poll_fast_batteries
+        - script.stop: poll_slow_batteries
+        - binary_sensor.template.publish:
+            id: battery_connected
+            state: OFF
+
+script:
+
+  - id: poll_fast_batteries
+    mode: single
+    then:
+      - lambda: |-
+          id(fast_script_start_time) = millis();
+          id(current_batt_id) = 1;
+      - logger.log: "Polling System Telemetry (Command 1)..."
+      - ble_client.ble_write:
+          id: ble
+          service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+          characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+          value: [0xAB, 0xAB, 0x01, 0x00, 0x00, 0x00, 0x00, 0x1, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A]
+      - delay: 200ms
+      - while:
+          condition:
+            lambda: 'return id(current_batt_id) <= (id(slave_count).state + 1);'
+          then:
+            - logger.log:
+                format: "Polling Battery (ID %d) for Telemetry (Command 2)..."
+                args: [ 'id(current_batt_id)' ]
+            - ble_client.ble_write:
+                id: ble
+                service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+                characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+                value: !lambda |-
+                  return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A};
+            - delay: 10ms
+            
+            - logger.log:
+                format: "Polling Battery (ID %d) for Cell Voltages (Command 3)..."
+                args: [ 'id(current_batt_id)' ]
+            - ble_client.ble_write:
+                id: ble
+                service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+                characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+                value: !lambda |-
+                  return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A};
+            - delay: 10ms
+            
+            - lambda: 'id(current_batt_id) += 1;'
+            
+      - lambda: |-
+          id(fast_actual_execution_time) = (millis() - id(fast_script_start_time)) / 1000.0;
+
+  - id: poll_slow_batteries
+    mode: single
+    then:
+      - lambda: |-
+          id(slow_script_start_time) = millis();
+          id(current_batt_id) = 1;
+      - while:
+          condition:
+            lambda: 'return id(current_batt_id) <= (id(slave_count).state + 1);'
+          then:
+            - logger.log:
+                format: "Polling Battery (ID %d) for Temperatures (Command 4)..."
+                args: [ 'id(current_batt_id)' ]
+            - ble_client.ble_write:
+                id: ble
+                service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+                characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+                value: !lambda |-
+                  return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A};
+            - delay: 10ms
+            
+            - logger.log:
+                format: "Polling Battery (ID %d) for Charge Energy (Command 9)..."
+                args: [ 'id(current_batt_id)' ]
+            - ble_client.ble_write:
+                id: ble
+                service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+                characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+                value: !lambda |-
+                  return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x15, 0x53, 0x43, 0x52, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A};
+            - delay: 10ms
+            
+            - logger.log:
+                format: "Polling Battery (ID %d) for Discharge Energy (Command 0A)..."
+                args: [ 'id(current_batt_id)' ]
+            - ble_client.ble_write:
+                id: ble
+                service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+                characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+                value: !lambda |-
+                  return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x15, 0x53, 0x43, 0x52, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A};
+            - delay: 10ms
+            
+            - lambda: 'id(current_batt_id) += 1;'
+            
+      - logger.log: "Polling System General View (Command 01)..."
+      - ble_client.ble_write:
+          id: ble
+          service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+          characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+          value: [0xAB, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A]
+      - delay: 10ms
+
+      - lambda: |-
+          id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
+
+interval:
+  # Force a disconnect every 10 minutes to prevent the PACE BMS Bluetooth stack from locking up
+  - interval: 10min
+    then:
+      - if:
+          condition:
+            lambda: 'return id(ble).connected();'
+          then:
+            - logger.log: "Initiating routine BLE disconnect to clear BMS buffer..."
+            - ble_client.disconnect: ble
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          // If either script is still running over the air, do nothing and don't count up yet!
+          if (id(poll_fast_batteries).is_running() || id(poll_slow_batteries).is_running()) {
+            return;
+          }
+          
+          id(fast_poll_timer) += 1;
+          id(slow_poll_timer) += 1;
+          
+          if (id(slow_poll_timer) >= id(slow_poll_interval).state) {
+            id(slow_poll_timer) = 0;
+            id(poll_slow_batteries).execute();
+          } else if (id(fast_poll_timer) >= id(fast_poll_interval).state) {
+            id(fast_poll_timer) = 0;
+            id(poll_fast_batteries).execute();
+          }
+
+text_sensor:
+  - platform: template
+    name: "System Alarms"
+    id: sys_alarms
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Alarms"
+    id: master_alarms
+  - platform: template
+    name: "Master Charging MOS"
+    id: master_charging_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Discharging MOS"
+    id: master_discharging_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Heating MOS"
+    id: master_heating_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Software Version"
+    id: master_software_version
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Secondary Alarms Mask"
+    id: master_secondary_alarms
+    entity_category: diagnostic
+    
+  - platform: template
+    name: "Slave 1 Alarms"
+    id: slave1_alarms
+  - platform: template
+    name: "Slave 1 Charging MOS"
+    id: slave1_charging_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 1 Discharging MOS"
+    id: slave1_discharging_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 1 Heating MOS"
+    id: slave1_heating_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 1 Software Version"
+    id: slave1_software_version
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 1 Secondary Alarms Mask"
+    id: slave1_secondary_alarms
+    entity_category: diagnostic
+    
+  - platform: template
+    name: "Slave 2 Alarms"
+    id: slave2_alarms
+  - platform: template
+    name: "Slave 2 Charging MOS"
+    id: slave2_charging_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 2 Discharging MOS"
+    id: slave2_discharging_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 2 Heating MOS"
+    id: slave2_heating_mos
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 2 Software Version"
+    id: slave2_software_version
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 2 Secondary Alarms Mask"
+    id: slave2_secondary_alarms
+    entity_category: diagnostic
+    
+  - platform: template
+    name: "Master Cell Imbalance Details"
+    id: master_cell_imbalance_details
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 1 Cell Imbalance Details"
+    id: slave1_cell_imbalance_details
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 2 Cell Imbalance Details"
+    id: slave2_cell_imbalance_details
+    entity_category: diagnostic
+  - platform: ble_client
+    ble_client_id: ble
+    name: "BLE RX Raw"
+    internal: true
+    service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+    characteristic_uuid: '6E400003-B5A3-F393-E0A9-E50E24DCCA9E'
+    notify: true
+    on_notify:
+      then:
+        - lambda: |-
+            static std::vector<uint8_t> rx_buf;
+            if (id(enable_raw_dumping).state) {
+              ESP_LOGD("VTAC_NOTIFY", "Received BLE payload of %d bytes", x.length());
+            }
+            for (int i = 0; i < x.length(); i++) {
+              rx_buf.push_back((uint8_t)x[i]);
+            }
+            
+            while (rx_buf.size() >= 12) {
+              if (rx_buf[0] != 0xCD || rx_buf[1] != 0xCD) {
+                rx_buf.erase(rx_buf.begin());
+                continue;
+              }
+              
+              int expected_len = rx_buf[9];
+              if (expected_len < 12 || expected_len > 200) {
+                 rx_buf.erase(rx_buf.begin()); // Corrupt length
+                 continue;
+              }
+              
+              if (rx_buf.size() < expected_len) {
+                break; // Wait for more chunks
+              }
+              
+              std::vector<uint8_t> f(rx_buf.begin(), rx_buf.begin() + expected_len);
+              rx_buf.erase(rx_buf.begin(), rx_buf.begin() + expected_len);
+              
+              uint8_t batt_id = f[2];
+              uint8_t cmd_code = f[7];
+              
+              if (id(enable_raw_dumping).state) {
+                std::string full_hex_str = "";
+                for (size_t i = 0; i < f.size(); i++) {
+                  char buf[4];
+                  sprintf(buf, "%02X ", f[i]);
+                  full_hex_str += buf;
+                }
+                ESP_LOGD("VTAC_RAW_ALL", "Command 0x%02X (Batt %d): %s", cmd_code, batt_id, full_hex_str.c_str());
+              }
+              
+              if (cmd_code == 0x09 && f.size() >= 21) {
+                float charge_ah = (((uint32_t)f[13] << 24) | ((uint32_t)f[14] << 16) | ((uint32_t)f[15] << 8) | (uint32_t)f[16]) / 100.0;
+                if (batt_id == 1) id(master_charge_capacity_ah).publish_state(charge_ah);
+                else if (batt_id == 2) id(slave1_charge_capacity_ah).publish_state(charge_ah);
+                else if (batt_id == 3) id(slave2_charge_capacity_ah).publish_state(charge_ah);
+              }
+              
+              if (cmd_code == 0x0A && f.size() >= 21) {
+                float discharge_ah = (((uint32_t)f[13] << 24) | ((uint32_t)f[14] << 16) | ((uint32_t)f[15] << 8) | (uint32_t)f[16]) / 100.0;
+                if (batt_id == 1) id(master_discharge_capacity_ah).publish_state(discharge_ah);
+                else if (batt_id == 2) id(slave1_discharge_capacity_ah).publish_state(discharge_ah);
+                else if (batt_id == 3) id(slave2_discharge_capacity_ah).publish_state(discharge_ah);
+              }
+              
+              if (cmd_code == 0x02 && f.size() >= 80) {
+                float voltage = (((uint8_t)f[10] << 8) | (uint8_t)f[11]) / 100.0;
+                float soc = (uint8_t)f[12];
+                float current = ((((uint8_t)f[13] << 8) | (uint8_t)f[14]) - 30000) / 100.0;
+                float capacity = (((uint8_t)f[75] << 8) | (uint8_t)f[76]) / 100.0;
+                float remaining_cap = (((uint8_t)f[71] << 8) | (uint8_t)f[72]) / 100.0;
+                float max_cell_v = (((uint8_t)f[17] << 8) | (uint8_t)f[18]) / 1000.0;
+                float min_cell_v = (((uint8_t)f[20] << 8) | (uint8_t)f[21]) / 1000.0;
+                float max_temp = ((uint8_t)f[23] - 40) + ((uint8_t)f[24] * 0.1);
+                float min_temp = ((uint8_t)f[26] - 40) + ((uint8_t)f[27] * 0.1);
+                
+                uint32_t critical_alarm = ((uint32_t)f[31] << 24) | ((uint32_t)f[32] << 16) | ((uint32_t)f[33] << 8) | (uint32_t)f[34];
+                uint32_t secondary_alarm = ((uint32_t)f[35] << 24) | ((uint32_t)f[36] << 16) | ((uint32_t)f[37] << 8) | (uint32_t)f[38];
+                
+                std::string alarms = "";
+                if (critical_alarm == 0) {
+                  alarms = "OK";
+                } else {
+                  const char* alarm_names[] = {
+                      "Low Total Voltage", "High Total Voltage", "Cell Low Voltage", "Cell High Voltage",
+                      "Discharge Over Current", "Charge Over Current", "Short Circuit", "Discharge High Temp",
+                      "Charge High Temp", "Discharge Low Temp", "Charge Low Temp", "MOS High Temp",
+                      "Unit Ultra-high Voltage", "Unit Ultra-low Voltage", "High Environment Temp",
+                      "Low Environment Temp", "Cell Fault"
+                  };
+                  for (int i = 0; i < 17; i++) {
+                      if ((critical_alarm >> i) & 1) {
+                          if (alarms.length() > 0) alarms += ", ";
+                          alarms += alarm_names[i];
+                      }
+                  }
+                  if (alarms.length() == 0) {
+                      char buf[32];
+                      sprintf(buf, "Unknown Alarm: %u", critical_alarm);
+                      alarms = buf;
+                  }
+                }
+                
+                char ver_buf[16];
+                sprintf(ver_buf, "%x.%x", (uint8_t)f[49], (uint8_t)f[50]);
+                std::string software_version = ver_buf;
+                char sec_buf[32];
+                sprintf(sec_buf, "%u", secondary_alarm);
+                
+                uint8_t mos_status = f[48];
+                std::string charge_mos = (mos_status & 0x01) ? "Open" : "Close";
+                std::string discharge_mos = (mos_status & 0x02) ? "Open" : "Close";
+                std::string heating_mos = (mos_status & 0x20) ? "Open" : "Close";
+
+                if (batt_id == 1) {
+                  id(master_voltage).publish_state(voltage);
+                  id(master_soc).publish_state(soc);
+                  id(master_current).publish_state(current);
+                  id(master_capacity).publish_state(capacity);
+                  id(master_remaining_capacity).publish_state(remaining_cap);
+                  id(master_max_cell_v).publish_state(max_cell_v);
+                  id(master_min_cell_v).publish_state(min_cell_v);
+                  id(master_max_temp).publish_state(max_temp);
+                  id(master_alarms).publish_state(alarms);
+                  id(master_charging_mos).publish_state(charge_mos);
+                  id(master_discharging_mos).publish_state(discharge_mos);
+                  id(master_heating_mos).publish_state(heating_mos);
+                  id(master_min_temp).publish_state(min_temp);
+                  id(master_software_version).publish_state(software_version);
+                  id(master_secondary_alarms).publish_state(sec_buf);
+                } else if (batt_id == 2) {
+                  id(slave1_voltage).publish_state(voltage);
+                  id(slave1_soc).publish_state(soc);
+                  id(slave1_current).publish_state(current);
+                  id(slave1_capacity).publish_state(capacity);
+                  id(slave1_remaining_capacity).publish_state(remaining_cap);
+                  id(slave1_max_cell_v).publish_state(max_cell_v);
+                  id(slave1_min_cell_v).publish_state(min_cell_v);
+                  id(slave1_max_temp).publish_state(max_temp);
+                  id(slave1_alarms).publish_state(alarms);
+                  id(slave1_charging_mos).publish_state(charge_mos);
+                  id(slave1_discharging_mos).publish_state(discharge_mos);
+                  id(slave1_heating_mos).publish_state(heating_mos);
+                  id(slave1_min_temp).publish_state(min_temp);
+                  id(slave1_software_version).publish_state(software_version);
+                  id(slave1_secondary_alarms).publish_state(sec_buf);
+                } else if (batt_id == 3) {
+                  id(slave2_voltage).publish_state(voltage);
+                  id(slave2_soc).publish_state(soc);
+                  id(slave2_current).publish_state(current);
+                  id(slave2_capacity).publish_state(capacity);
+                  id(slave2_remaining_capacity).publish_state(remaining_cap);
+                  id(slave2_max_cell_v).publish_state(max_cell_v);
+                  id(slave2_min_cell_v).publish_state(min_cell_v);
+                  id(slave2_max_temp).publish_state(max_temp);
+                  id(slave2_alarms).publish_state(alarms);
+                  id(slave2_charging_mos).publish_state(charge_mos);
+                  id(slave2_discharging_mos).publish_state(discharge_mos);
+                  id(slave2_heating_mos).publish_state(heating_mos);
+                  id(slave2_min_temp).publish_state(min_temp);
+                  id(slave2_software_version).publish_state(software_version);
+                  id(slave2_secondary_alarms).publish_state(sec_buf);
+                }
+              } else if (cmd_code == 0x03) {
+                float cell1 = 0;
+                if (f.size() >= 13) cell1 = (((uint8_t)f[11] << 8) | (uint8_t)f[12]) / 1000.0;
+                float cell2 = 0;
+                if (f.size() >= 15) cell2 = (((uint8_t)f[13] << 8) | (uint8_t)f[14]) / 1000.0;
+                float cell3 = 0;
+                if (f.size() >= 17) cell3 = (((uint8_t)f[15] << 8) | (uint8_t)f[16]) / 1000.0;
+                float cell4 = 0;
+                if (f.size() >= 19) cell4 = (((uint8_t)f[17] << 8) | (uint8_t)f[18]) / 1000.0;
+                float cell5 = 0;
+                if (f.size() >= 21) cell5 = (((uint8_t)f[19] << 8) | (uint8_t)f[20]) / 1000.0;
+                float cell6 = 0;
+                if (f.size() >= 23) cell6 = (((uint8_t)f[21] << 8) | (uint8_t)f[22]) / 1000.0;
+                float cell7 = 0;
+                if (f.size() >= 25) cell7 = (((uint8_t)f[23] << 8) | (uint8_t)f[24]) / 1000.0;
+                float cell8 = 0;
+                if (f.size() >= 27) cell8 = (((uint8_t)f[25] << 8) | (uint8_t)f[26]) / 1000.0;
+                float cell9 = 0;
+                if (f.size() >= 29) cell9 = (((uint8_t)f[27] << 8) | (uint8_t)f[28]) / 1000.0;
+                float cell10 = 0;
+                if (f.size() >= 31) cell10 = (((uint8_t)f[29] << 8) | (uint8_t)f[30]) / 1000.0;
+                float cell11 = 0;
+                if (f.size() >= 33) cell11 = (((uint8_t)f[31] << 8) | (uint8_t)f[32]) / 1000.0;
+                float cell12 = 0;
+                if (f.size() >= 35) cell12 = (((uint8_t)f[33] << 8) | (uint8_t)f[34]) / 1000.0;
+                float cell13 = 0;
+                if (f.size() >= 37) cell13 = (((uint8_t)f[35] << 8) | (uint8_t)f[36]) / 1000.0;
+                float cell14 = 0;
+                if (f.size() >= 39) cell14 = (((uint8_t)f[37] << 8) | (uint8_t)f[38]) / 1000.0;
+                float cell15 = 0;
+                if (f.size() >= 41) cell15 = (((uint8_t)f[39] << 8) | (uint8_t)f[40]) / 1000.0;
+                float cells[] = {cell1, cell2, cell3, cell4, cell5, cell6, cell7, cell8, cell9, cell10, cell11, cell12, cell13, cell14, cell15};
+                int max_idx = 0;
+                int min_idx = 0;
+                float max_v = cells[0];
+                float min_v = 9.9;
+                for (int i = 0; i < 15; i++) {
+                  if (cells[i] > max_v) { max_v = cells[i]; max_idx = i; }
+                  if (cells[i] < min_v && cells[i] > 0) { min_v = cells[i]; min_idx = i; }
+                }
+                char diff_buf[64];
+                sprintf(diff_buf, "Max: Cell %d (%.3fV) | Min: Cell %d (%.3fV) | Delta: %.0fmV", max_idx + 1, max_v, min_idx + 1, min_v, (max_v - min_v) * 1000.0);
+                std::string imbalance_details = diff_buf;
+
+                float cell16 = 0;
+                if (f.size() >= 43) cell16 = (((uint8_t)f[41] << 8) | (uint8_t)f[42]) / 1000.0;
+                if (batt_id == 0x01) {
+                  if (cell1 > 0) id(master_cell_1).publish_state(cell1);
+                  if (cell2 > 0) id(master_cell_2).publish_state(cell2);
+                  if (cell3 > 0) id(master_cell_3).publish_state(cell3);
+                  if (cell4 > 0) id(master_cell_4).publish_state(cell4);
+                  if (cell5 > 0) id(master_cell_5).publish_state(cell5);
+                  if (cell6 > 0) id(master_cell_6).publish_state(cell6);
+                  if (cell7 > 0) id(master_cell_7).publish_state(cell7);
+                  if (cell8 > 0) id(master_cell_8).publish_state(cell8);
+                  if (cell9 > 0) id(master_cell_9).publish_state(cell9);
+                  if (cell10 > 0) id(master_cell_10).publish_state(cell10);
+                  if (cell11 > 0) id(master_cell_11).publish_state(cell11);
+                  if (cell12 > 0) id(master_cell_12).publish_state(cell12);
+                  if (cell13 > 0) id(master_cell_13).publish_state(cell13);
+                  if (cell14 > 0) id(master_cell_14).publish_state(cell14);
+                  if (cell15 > 0) id(master_cell_15).publish_state(cell15);
+                  id(master_cell_imbalance_details).publish_state(imbalance_details);
+                  if (cell16 > 0) id(master_cell_16).publish_state(cell16);
+                } else if (batt_id == 0x02) {
+                  if (cell1 > 0) id(slave1_cell_1).publish_state(cell1);
+                  if (cell2 > 0) id(slave1_cell_2).publish_state(cell2);
+                  if (cell3 > 0) id(slave1_cell_3).publish_state(cell3);
+                  if (cell4 > 0) id(slave1_cell_4).publish_state(cell4);
+                  if (cell5 > 0) id(slave1_cell_5).publish_state(cell5);
+                  if (cell6 > 0) id(slave1_cell_6).publish_state(cell6);
+                  if (cell7 > 0) id(slave1_cell_7).publish_state(cell7);
+                  if (cell8 > 0) id(slave1_cell_8).publish_state(cell8);
+                  if (cell9 > 0) id(slave1_cell_9).publish_state(cell9);
+                  if (cell10 > 0) id(slave1_cell_10).publish_state(cell10);
+                  if (cell11 > 0) id(slave1_cell_11).publish_state(cell11);
+                  if (cell12 > 0) id(slave1_cell_12).publish_state(cell12);
+                  if (cell13 > 0) id(slave1_cell_13).publish_state(cell13);
+                  if (cell14 > 0) id(slave1_cell_14).publish_state(cell14);
+                  if (cell15 > 0) id(slave1_cell_15).publish_state(cell15);
+                  id(slave1_cell_imbalance_details).publish_state(imbalance_details);
+                  if (cell16 > 0) id(slave1_cell_16).publish_state(cell16);
+                } else if (batt_id == 0x03) {
+                  if (cell1 > 0) id(slave2_cell_1).publish_state(cell1);
+                  if (cell2 > 0) id(slave2_cell_2).publish_state(cell2);
+                  if (cell3 > 0) id(slave2_cell_3).publish_state(cell3);
+                  if (cell4 > 0) id(slave2_cell_4).publish_state(cell4);
+                  if (cell5 > 0) id(slave2_cell_5).publish_state(cell5);
+                  if (cell6 > 0) id(slave2_cell_6).publish_state(cell6);
+                  if (cell7 > 0) id(slave2_cell_7).publish_state(cell7);
+                  if (cell8 > 0) id(slave2_cell_8).publish_state(cell8);
+                  if (cell9 > 0) id(slave2_cell_9).publish_state(cell9);
+                  if (cell10 > 0) id(slave2_cell_10).publish_state(cell10);
+                  if (cell11 > 0) id(slave2_cell_11).publish_state(cell11);
+                  if (cell12 > 0) id(slave2_cell_12).publish_state(cell12);
+                  if (cell13 > 0) id(slave2_cell_13).publish_state(cell13);
+                  if (cell14 > 0) id(slave2_cell_14).publish_state(cell14);
+                  if (cell15 > 0) id(slave2_cell_15).publish_state(cell15);
+                  id(slave2_cell_imbalance_details).publish_state(imbalance_details);
+                  if (cell16 > 0) id(slave2_cell_16).publish_state(cell16);
+                }
+              } else if (cmd_code == 0x04) {
+                float temp1 = -100;
+                if (f.size() >= 13 && (uint8_t)f[11] != 0xFF) temp1 = ((uint8_t)f[11] - 40) + ((uint8_t)f[12] * 0.1);
+                float temp2 = -100;
+                if (f.size() >= 15 && (uint8_t)f[13] != 0xFF) temp2 = ((uint8_t)f[13] - 40) + ((uint8_t)f[14] * 0.1);
+                float temp3 = -100;
+                if (f.size() >= 17 && (uint8_t)f[15] != 0xFF) temp3 = ((uint8_t)f[15] - 40) + ((uint8_t)f[16] * 0.1);
+                float temp4 = -100;
+                if (f.size() >= 19 && (uint8_t)f[17] != 0xFF) temp4 = ((uint8_t)f[17] - 40) + ((uint8_t)f[18] * 0.1);
+                float temp5 = -100;
+                if (f.size() >= 21 && (uint8_t)f[19] != 0xFF) temp5 = ((uint8_t)f[19] - 40) + ((uint8_t)f[20] * 0.1);
+                float temp6 = -100;
+                if (f.size() >= 25 && (uint8_t)f[23] != 0xFF) temp6 = ((uint8_t)f[23] - 40) + ((uint8_t)f[24] * 0.1);
+                float temp7 = -100;
+                if (f.size() >= 27 && (uint8_t)f[25] != 0xFF) temp7 = ((uint8_t)f[25] - 40) + ((uint8_t)f[26] * 0.1);
+                if (batt_id == 0x01) {
+                  if (temp1 != -100) id(master_temp_1).publish_state(temp1);
+                  if (temp2 != -100) id(master_temp_2).publish_state(temp2);
+                  if (temp3 != -100) id(master_temp_3).publish_state(temp3);
+                  if (temp4 != -100) id(master_temp_4).publish_state(temp4);
+                  if (temp5 != -100) id(master_temp_5).publish_state(temp5);
+                  if (temp6 != -100) id(master_temp_6).publish_state(temp6);
+                  if (temp7 != -100) id(master_temp_7).publish_state(temp7);
+                } else if (batt_id == 0x02) {
+                  if (temp1 != -100) id(slave1_temp_1).publish_state(temp1);
+                  if (temp2 != -100) id(slave1_temp_2).publish_state(temp2);
+                  if (temp3 != -100) id(slave1_temp_3).publish_state(temp3);
+                  if (temp4 != -100) id(slave1_temp_4).publish_state(temp4);
+                  if (temp5 != -100) id(slave1_temp_5).publish_state(temp5);
+                  if (temp6 != -100) id(slave1_temp_6).publish_state(temp6);
+                  if (temp7 != -100) id(slave1_temp_7).publish_state(temp7);
+                } else if (batt_id == 0x03) {
+                  if (temp1 != -100) id(slave2_temp_1).publish_state(temp1);
+                  if (temp2 != -100) id(slave2_temp_2).publish_state(temp2);
+                  if (temp3 != -100) id(slave2_temp_3).publish_state(temp3);
+                  if (temp4 != -100) id(slave2_temp_4).publish_state(temp4);
+                  if (temp5 != -100) id(slave2_temp_5).publish_state(temp5);
+                  if (temp6 != -100) id(slave2_temp_6).publish_state(temp6);
+                  if (temp7 != -100) id(slave2_temp_7).publish_state(temp7);
+                }
+              } else if (cmd_code == 0x01) {
+                if (f.size() >= 41) {
+                  float totalVoltage = (((uint32_t)f[10] << 8) | (uint32_t)f[11]) / 100.0;
+                  uint8_t soc = f[12];
+                  float totalCurrent = ((((uint32_t)f[13] << 16) | ((uint32_t)f[14] << 8) | (uint32_t)f[15]) - 450000.0) / 100.0;
+                  float surplusSoc = (((uint32_t)f[16] << 16) | ((uint32_t)f[17] << 8) | (uint32_t)f[18]) / 100.0;
+                  
+                  uint32_t critical_alarm = ((uint32_t)f[26] << 24) | ((uint32_t)f[27] << 16) | ((uint32_t)f[28] << 8) | (uint32_t)f[29];
+                  
+                  float highestTemperatures = (f[36] - 40.0) + (f[37] / 10.0);
+                  float lowTemperatures = (f[38] - 40.0) + (f[39] / 10.0);
+                  
+                  // Extended 0x01 payload values
+                  float maxChargeCurrent = 0;
+                  float maxDischargeCurrent = 0;
+                  uint8_t batteryStatus = 0;
+                  uint32_t secondaryAlarms = 0;
+                  uint8_t parallelCount = 0;
+                  float highestCellVoltage = 0;
+                  float lowestCellVoltage = 0;
+                  float chargeEnergy = 0;
+                  float dischargeEnergy = 0;
+                  uint8_t soh = 0;
+                  float trueCapacity = 0;
+                  uint8_t batteryType = 0;
+                  
+                  if (f.size() >= 55) {
+                      maxChargeCurrent = (((uint32_t)f[19] << 16) | ((uint32_t)f[20] << 8) | (uint32_t)f[21]) / 100.0;
+                      maxDischargeCurrent = (((uint32_t)f[22] << 16) | ((uint32_t)f[23] << 8) | (uint32_t)f[24]) / 100.0;
+                      batteryStatus = f[25];
+                      secondaryAlarms = ((uint32_t)f[30] << 24) | ((uint32_t)f[31] << 16) | ((uint32_t)f[32] << 8) | (uint32_t)f[33];
+                      parallelCount = f[34];
+                      highestCellVoltage = (((uint32_t)f[40] << 8) | (uint32_t)f[41]) / 1000.0;
+                      lowestCellVoltage = (((uint32_t)f[42] << 8) | (uint32_t)f[43]) / 1000.0;
+                      chargeEnergy = (((uint32_t)f[44] << 16) | ((uint32_t)f[45] << 8) | (uint32_t)f[46]) / 10.0;
+                      dischargeEnergy = (((uint32_t)f[47] << 16) | ((uint32_t)f[48] << 8) | (uint32_t)f[49]) / 10.0;
+                      soh = f[50];
+                      trueCapacity = (((uint32_t)f[51] << 16) | ((uint32_t)f[52] << 8) | (uint32_t)f[53]) / 100.0;
+                      batteryType = f[54];
+                  }
+                  
+                  std::string alarms = "";
+                  if (critical_alarm == 0) {
+                    alarms = "OK";
+                  } else {
+                    const char* sys_alarm_names[] = {
+                      "Low Total Voltage", "High Total Voltage", "Cell Low Voltage", "Cell High Voltage",
+                      "Discharge Overcurrent", "Charge Overcurrent", "Short Circuit", "Discharge High Temp",
+                      "Charge High Temp", "Discharge Low Temp", "Charge Low Temp", "MOS High Temp",
+                      "Unit Ultra High Voltage", "Unit Ultra Low Voltage", "High Environment Temp", "Total Overvoltage",
+                      "Precharge Failure", "ID Assignment Overtime", "Cell Fault", "Low Environment Temp"
+                    };
+                    for (int i = 0; i < 20; i++) {
+                        if ((critical_alarm >> i) & 1) {
+                            if (alarms.length() > 0) alarms += ", ";
+                            alarms += sys_alarm_names[i];
+                        }
+                    }
+                    if (alarms.length() == 0) {
+                        char buf[32];
+                        sprintf(buf, "Unknown Alarm: %u", critical_alarm);
+                        alarms = buf;
+                    }
+                  }
+                  
+                  id(sys_total_voltage).publish_state(totalVoltage);
+                  id(sys_total_soc).publish_state(soc);
+                  id(sys_total_current).publish_state(totalCurrent);
+                  id(sys_remaining_capacity).publish_state(surplusSoc);
+                  id(sys_max_temp).publish_state(highestTemperatures);
+                  id(sys_min_temp).publish_state(lowTemperatures);
+                  id(sys_alarms).publish_state(alarms);
+                  
+                  if (f.size() >= 55) {
+                      id(sys_capacity).publish_state(trueCapacity);
+                      id(sys_charge_energy).publish_state(chargeEnergy);
+                      id(sys_discharge_energy).publish_state(dischargeEnergy);
+                      id(sys_max_charge_current).publish_state(maxChargeCurrent);
+                      id(sys_max_discharge_current).publish_state(maxDischargeCurrent);
+                      id(sys_battery_status).publish_state(batteryStatus);
+                      id(sys_secondary_alarms).publish_state(secondaryAlarms);
+                      id(sys_parallel_count).publish_state(parallelCount);
+                      id(sys_highest_cell_voltage).publish_state(highestCellVoltage);
+                      id(sys_lowest_cell_voltage).publish_state(lowestCellVoltage);
+                      id(sys_soh).publish_state(soh);
+                      id(sys_battery_type).publish_state(batteryType);
+                  }
+                }
+              } else if (cmd_code != 0x01 && cmd_code != 0x02 && cmd_code != 0x03 && cmd_code != 0x04 && cmd_code != 0x09 && cmd_code != 0x0A) {
+                std::string hex_str = "";
+                for (size_t i = 0; i < f.size(); i++) {
+                  char buf[4];
+                  sprintf(buf, "%02X ", f[i]);
+                  hex_str += buf;
+                }
+                ESP_LOGI("VTAC_RAW", "Raw Command 0x%02X Response (Batt %d): %s", cmd_code, batt_id, hex_str.c_str());
+              }
+            }
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Strength"
+    update_interval: 10s
+    entity_category: diagnostic
+  - platform: template
+    name: "Fast Execution Time"
+    id: fast_execution_time_sensor
+    unit_of_measurement: "s"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 2s
+    lambda: 'return id(fast_actual_execution_time);'
+  - platform: template
+    name: "Slow Execution Time"
+    id: slow_execution_time_sensor
+    unit_of_measurement: "s"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 2s
+    lambda: 'return id(slow_actual_execution_time);'
+
+  # Master
+
+  # --- System General View (Command 0x01) ---
+  - platform: template
+    name: "System Total Voltage"
+    id: sys_total_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Total Current"
+    id: sys_total_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Total SOC"
+    id: sys_total_soc
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Capacity"
+    id: sys_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+
+  - platform: template
+    name: "System Remaining Capacity"
+    id: sys_remaining_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+
+  - platform: template
+    name: "System Charge Energy"
+    id: sys_charge_energy
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Discharge Energy"
+    id: sys_discharge_energy
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Max Charge Current"
+    id: sys_max_charge_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Max Discharge Current"
+    id: sys_max_discharge_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Battery Status"
+    id: sys_battery_status
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Parallel Count"
+    id: sys_parallel_count
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Highest Cell Voltage"
+    id: sys_highest_cell_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Lowest Cell Voltage"
+    id: sys_lowest_cell_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System SOH"
+    id: sys_soh
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Battery Type"
+    id: sys_battery_type
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Secondary Alarms Mask"
+    id: sys_secondary_alarms
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Max Temp"
+    id: sys_max_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+
+  - platform: template
+    name: "System Min Temp"
+    id: sys_min_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    
+  # --- Individual Battery Additions (Command 0x02) ---
+  - platform: template
+    name: "Master Min Cell Voltage"
+    id: master_min_cell_v
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+  - platform: template
+    name: "Master Max Cell Voltage"
+    id: master_max_cell_v
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+
+  - platform: template
+    name: "Master Capacity"
+    id: master_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Master Remaining Capacity"
+    id: master_remaining_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Master Charge Capacity"
+    id: master_charge_capacity_ah
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Discharge Capacity"
+    id: master_discharge_capacity_ah
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Slave 1 Min Cell Voltage"
+    id: slave1_min_cell_v
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+  - platform: template
+    name: "Slave 1 Max Cell Voltage"
+    id: slave1_max_cell_v
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+
+  - platform: template
+    name: "Slave 1 Capacity"
+    id: slave1_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Slave 1 Remaining Capacity"
+    id: slave1_remaining_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Slave 1 Charge Capacity"
+    id: slave1_charge_capacity_ah
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 1 Discharge Capacity"
+    id: slave1_discharge_capacity_ah
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Slave 2 Min Cell Voltage"
+    id: slave2_min_cell_v
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+  - platform: template
+    name: "Slave 2 Max Cell Voltage"
+    id: slave2_max_cell_v
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+
+  - platform: template
+    name: "Slave 2 Capacity"
+    id: slave2_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Slave 2 Remaining Capacity"
+    id: slave2_remaining_capacity
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Slave 2 Charge Capacity"
+    id: slave2_charge_capacity_ah
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+  - platform: template
+    name: "Slave 2 Discharge Capacity"
+    id: slave2_discharge_capacity_ah
+    unit_of_measurement: "Ah"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+  - platform: template
+    name: "Master Voltage"
+    id: master_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Master Current"
+    id: master_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Master SOC"
+    id: master_soc
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    name: "Master Max Temp"
+    id: master_max_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+  - platform: template
+    name: "Master Min Temp"
+    id: master_min_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Slave 1
+  - platform: template
+    name: "Slave 1 Voltage"
+    id: slave1_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Current"
+    id: slave1_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Slave 1 SOC"
+    id: slave1_soc
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Max Temp"
+    id: slave1_max_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+  - platform: template
+    name: "Slave 1 Min Temp"
+    id: slave1_min_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Slave 2
+  - platform: template
+    name: "Slave 2 Voltage"
+    id: slave2_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Current"
+    id: slave2_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Slave 2 SOC"
+    id: slave2_soc
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Max Temp"
+    id: slave2_max_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+  - platform: template
+    name: "Slave 2 Min Temp"
+    id: slave2_min_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Master Cells
+  - platform: template
+    name: "Master Cell 1 Voltage"
+    id: master_cell_1
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 2 Voltage"
+    id: master_cell_2
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 3 Voltage"
+    id: master_cell_3
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 4 Voltage"
+    id: master_cell_4
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 5 Voltage"
+    id: master_cell_5
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 6 Voltage"
+    id: master_cell_6
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 7 Voltage"
+    id: master_cell_7
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 8 Voltage"
+    id: master_cell_8
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 9 Voltage"
+    id: master_cell_9
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 10 Voltage"
+    id: master_cell_10
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 11 Voltage"
+    id: master_cell_11
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 12 Voltage"
+    id: master_cell_12
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 13 Voltage"
+    id: master_cell_13
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 14 Voltage"
+    id: master_cell_14
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 15 Voltage"
+    id: master_cell_15
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Master Cell 16 Voltage"
+    id: master_cell_16
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  # Master Temps
+  - platform: template
+    name: "Master Terminal Temp 1"
+    id: master_temp_1
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Master Terminal Temp 2"
+    id: master_temp_2
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Master Electrode Temp 1"
+    id: master_temp_3
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Master Electrode Temp 2"
+    id: master_temp_4
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Master Ambient Temp 1"
+    id: master_temp_5
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Master MOS Temp 1"
+    id: master_temp_6
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Master MOS Temp 2"
+    id: master_temp_7
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  # Slave 1 Cells
+  - platform: template
+    name: "Slave 1 Cell 1 Voltage"
+    id: slave1_cell_1
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 2 Voltage"
+    id: slave1_cell_2
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 3 Voltage"
+    id: slave1_cell_3
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 4 Voltage"
+    id: slave1_cell_4
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 5 Voltage"
+    id: slave1_cell_5
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 6 Voltage"
+    id: slave1_cell_6
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 7 Voltage"
+    id: slave1_cell_7
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 8 Voltage"
+    id: slave1_cell_8
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 9 Voltage"
+    id: slave1_cell_9
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 10 Voltage"
+    id: slave1_cell_10
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 11 Voltage"
+    id: slave1_cell_11
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 12 Voltage"
+    id: slave1_cell_12
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 13 Voltage"
+    id: slave1_cell_13
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 14 Voltage"
+    id: slave1_cell_14
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 15 Voltage"
+    id: slave1_cell_15
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Cell 16 Voltage"
+    id: slave1_cell_16
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  # Slave 1 Temps
+  - platform: template
+    name: "Slave 1 Terminal Temp 1"
+    id: slave1_temp_1
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Terminal Temp 2"
+    id: slave1_temp_2
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Electrode Temp 1"
+    id: slave1_temp_3
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Electrode Temp 2"
+    id: slave1_temp_4
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 1 Ambient Temp 1"
+    id: slave1_temp_5
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 1 MOS Temp 1"
+    id: slave1_temp_6
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 1 MOS Temp 2"
+    id: slave1_temp_7
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  # Slave 2 Cells
+  - platform: template
+    name: "Slave 2 Cell 1 Voltage"
+    id: slave2_cell_1
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 2 Voltage"
+    id: slave2_cell_2
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 3 Voltage"
+    id: slave2_cell_3
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 4 Voltage"
+    id: slave2_cell_4
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 5 Voltage"
+    id: slave2_cell_5
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 6 Voltage"
+    id: slave2_cell_6
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 7 Voltage"
+    id: slave2_cell_7
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 8 Voltage"
+    id: slave2_cell_8
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 9 Voltage"
+    id: slave2_cell_9
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 10 Voltage"
+    id: slave2_cell_10
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 11 Voltage"
+    id: slave2_cell_11
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 12 Voltage"
+    id: slave2_cell_12
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 13 Voltage"
+    id: slave2_cell_13
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 14 Voltage"
+    id: slave2_cell_14
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 15 Voltage"
+    id: slave2_cell_15
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Cell 16 Voltage"
+    id: slave2_cell_16
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+  # Slave 2 Temps
+  - platform: template
+    name: "Slave 2 Terminal Temp 1"
+    id: slave2_temp_1
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Terminal Temp 2"
+    id: slave2_temp_2
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Electrode Temp 1"
+    id: slave2_temp_3
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Electrode Temp 2"
+    id: slave2_temp_4
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 2 Ambient Temp 1"
+    id: slave2_temp_5
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 2 MOS Temp 1"
+    id: slave2_temp_6
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+  - platform: template
+    name: "Slave 2 MOS Temp 2"
+    id: slave2_temp_7
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Diagnostics
+  - platform: template
+    name: "Master Instantaneous Power"
+    id: master_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    lambda: 'return id(master_voltage).state * id(master_current).state;'
+  - platform: template
+    name: "Master Cycle Count"
+    id: master_cycle_count
+    unit_of_measurement: "Cycles"
+    accuracy_decimals: 1
+    lambda: |-
+      if (id(master_capacity).state > 0) {
+        return id(master_discharge_capacity_ah).state / id(master_capacity).state;
+      }
+      return 0;
+  - platform: template
+    name: "Master Time to Full/Empty"
+    id: master_time_remaining
+    unit_of_measurement: "h"
+    accuracy_decimals: 1
+    lambda: |-
+      float current = id(master_current).state;
+      if (current == 0) return 0;
+      if (current < 0) {
+        return id(master_remaining_capacity).state / (-current);
+      } else {
+        return (id(master_capacity).state - id(master_remaining_capacity).state) / current;
+      }
+  - platform: template
+    name: "Master Cell Imbalance"
+    id: master_cell_imbalance
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    lambda: 'return (id(master_max_cell_v).state - id(master_min_cell_v).state) * 1000.0;'
+    
+  - platform: template
+    name: "Slave 1 Instantaneous Power"
+    id: slave1_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    lambda: 'return id(slave1_voltage).state * id(slave1_current).state;'
+  - platform: template
+    name: "Slave 1 Cycle Count"
+    id: slave1_cycle_count
+    unit_of_measurement: "Cycles"
+    accuracy_decimals: 1
+    lambda: |-
+      if (id(slave1_capacity).state > 0) {
+        return id(slave1_discharge_capacity_ah).state / id(slave1_capacity).state;
+      }
+      return 0;
+  - platform: template
+    name: "Slave 1 Time to Full/Empty"
+    id: slave1_time_remaining
+    unit_of_measurement: "h"
+    accuracy_decimals: 1
+    lambda: |-
+      float current = id(slave1_current).state;
+      if (current == 0) return 0;
+      if (current < 0) {
+        return id(slave1_remaining_capacity).state / (-current);
+      } else {
+        return (id(slave1_capacity).state - id(slave1_remaining_capacity).state) / current;
+      }
+  - platform: template
+    name: "Slave 1 Cell Imbalance"
+    id: slave1_cell_imbalance
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    lambda: 'return (id(slave1_max_cell_v).state - id(slave1_min_cell_v).state) * 1000.0;'
+
+  - platform: template
+    name: "Slave 2 Instantaneous Power"
+    id: slave2_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    lambda: 'return id(slave2_voltage).state * id(slave2_current).state;'
+  - platform: template
+    name: "Slave 2 Cycle Count"
+    id: slave2_cycle_count
+    unit_of_measurement: "Cycles"
+    accuracy_decimals: 1
+    lambda: |-
+      if (id(slave2_capacity).state > 0) {
+        return id(slave2_discharge_capacity_ah).state / id(slave2_capacity).state;
+      }
+      return 0;
+  - platform: template
+    name: "Slave 2 Time to Full/Empty"
+    id: slave2_time_remaining
+    unit_of_measurement: "h"
+    accuracy_decimals: 1
+    lambda: |-
+      float current = id(slave2_current).state;
+      if (current == 0) return 0;
+      if (current < 0) {
+        return id(slave2_remaining_capacity).state / (-current);
+      } else {
+        return (id(slave2_capacity).state - id(slave2_remaining_capacity).state) / current;
+      }
+  - platform: template
+    name: "Slave 2 Cell Imbalance"
+    id: slave2_cell_imbalance
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    lambda: 'return (id(slave2_max_cell_v).state - id(slave2_min_cell_v).state) * 1000.0;'
+
+switch:
+  - platform: template
+    name: "Enable Raw Data Dump"
+    id: enable_raw_dumping
+    entity_category: diagnostic
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+
+
