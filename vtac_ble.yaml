@@ -230,15 +230,19 @@ script:
           id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
 
 interval:
-  # Force a disconnect every 10 minutes to prevent the PACE BMS Bluetooth stack from locking up
-  - interval: 10min
+  # Force a deeper disconnect every 5 minutes to prevent the PACE BMS Bluetooth stack from locking up
+  # We stop the scanner to ensure it stays disconnected for exactly 5 seconds to let the battery breathe
+  - interval: 5min
     then:
       - if:
           condition:
             lambda: 'return id(ble).connected();'
           then:
-            - logger.log: "Initiating routine BLE disconnect to clear BMS buffer..."
+            - logger.log: "Initiating 5-second BLE breather to clear BMS buffer..."
+            - esp32_ble_tracker.stop_scan:
             - ble_client.disconnect: ble
+            - delay: 5s
+            - esp32_ble_tracker.start_scan:
 
   - interval: 1s
     then:
