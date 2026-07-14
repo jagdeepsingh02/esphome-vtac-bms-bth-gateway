@@ -136,8 +136,8 @@ ble_client:
     on_disconnect:
       then:
         - logger.log: "Disconnected from Battery!"
-        - script.stop: poll_fast_batteries
-        - script.stop: poll_slow_batteries
+        - script.stop: execute_fast_jobs
+        - script.stop: execute_slow_jobs
         - binary_sensor.template.publish:
             id: battery_connected
             state: OFF
