@@ -36,6 +36,12 @@ globals:
   - id: slow_actual_execution_time
     type: float
     initial_value: '0'
+  - id: current_job_start
+    type: uint32_t
+    initial_value: '0'
+  - id: current_job_name
+    type: std::string
+    initial_value: '""'
   - id: response_received
     type: bool
     initial_value: 'false'
@@ -139,7 +145,10 @@ script:
           id(fast_script_start_time) = millis();
           id(current_batt_id) = 1;
       - logger.log: "Polling System Telemetry (Command 1)..."
-      - lambda: 'id(response_received) = false;'
+      - lambda: |-
+          id(response_received) = false;
+          id(current_job_start) = millis();
+          id(current_job_name) = "System Telemetry (Command 1)";
       - ble_client.ble_write:
           id: ble
           service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -150,6 +159,15 @@ script:
             lambda: 'return id(response_received);'
           timeout: 1.5s
       - delay: 50ms
+      - lambda: |-
+          uint32_t duration = millis() - id(current_job_start);
+          float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+          if (duration > current_max) {
+            id(longest_response_time).publish_state(duration);
+            char buf[100];
+            sprintf(buf, "%s", id(current_job_name).c_str());
+            id(longest_response_job).publish_state(buf);
+          }
       - while:
           condition:
             lambda: 'return id(current_batt_id) <= (id(slave_count).state + 1);'
@@ -157,7 +175,10 @@ script:
             - logger.log:
                 format: "Polling Battery (ID %d) for Telemetry (Command 2)..."
                 args: [ 'id(current_batt_id)' ]
-            - lambda: 'id(response_received) = false;'
+            - lambda: |-
+                id(response_received) = false;
+                id(current_job_start) = millis();
+                id(current_job_name) = "Telemetry (Command 2)";
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -169,11 +190,23 @@ script:
                   lambda: 'return id(response_received);'
                 timeout: 1.5s
             - delay: 50ms
+            - lambda: |-
+                uint32_t duration = millis() - id(current_job_start);
+                float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+                if (duration > current_max) {
+                  id(longest_response_time).publish_state(duration);
+                  char buf[100];
+                  sprintf(buf, "%s (Batt %d)", id(current_job_name).c_str(), id(current_batt_id));
+                  id(longest_response_job).publish_state(buf);
+                }
             
             - logger.log:
                 format: "Polling Battery (ID %d) for Cell Voltages (Command 3)..."
                 args: [ 'id(current_batt_id)' ]
-            - lambda: 'id(response_received) = false;'
+            - lambda: |-
+                id(response_received) = false;
+                id(current_job_start) = millis();
+                id(current_job_name) = "Cell Voltages (Command 3)";
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -185,6 +218,15 @@ script:
                   lambda: 'return id(response_received);'
                 timeout: 1.5s
             - delay: 50ms
+            - lambda: |-
+                uint32_t duration = millis() - id(current_job_start);
+                float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+                if (duration > current_max) {
+                  id(longest_response_time).publish_state(duration);
+                  char buf[100];
+                  sprintf(buf, "%s (Batt %d)", id(current_job_name).c_str(), id(current_batt_id));
+                  id(longest_response_job).publish_state(buf);
+                }
             
             - lambda: 'id(current_batt_id) += 1;'
             
@@ -204,7 +246,10 @@ script:
             - logger.log:
                 format: "Polling Battery (ID %d) for Temperatures (Command 4)..."
                 args: [ 'id(current_batt_id)' ]
-            - lambda: 'id(response_received) = false;'
+            - lambda: |-
+                id(response_received) = false;
+                id(current_job_start) = millis();
+                id(current_job_name) = "Temperatures (Command 4)";
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -216,11 +261,23 @@ script:
                   lambda: 'return id(response_received);'
                 timeout: 1.5s
             - delay: 50ms
+            - lambda: |-
+                uint32_t duration = millis() - id(current_job_start);
+                float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+                if (duration > current_max) {
+                  id(longest_response_time).publish_state(duration);
+                  char buf[100];
+                  sprintf(buf, "%s (Batt %d)", id(current_job_name).c_str(), id(current_batt_id));
+                  id(longest_response_job).publish_state(buf);
+                }
             
             - logger.log:
                 format: "Polling Battery (ID %d) for Charge Energy (Command 9)..."
                 args: [ 'id(current_batt_id)' ]
-            - lambda: 'id(response_received) = false;'
+            - lambda: |-
+                id(response_received) = false;
+                id(current_job_start) = millis();
+                id(current_job_name) = "Charge Energy (Command 9)";
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -232,11 +289,23 @@ script:
                   lambda: 'return id(response_received);'
                 timeout: 1.5s
             - delay: 50ms
+            - lambda: |-
+                uint32_t duration = millis() - id(current_job_start);
+                float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+                if (duration > current_max) {
+                  id(longest_response_time).publish_state(duration);
+                  char buf[100];
+                  sprintf(buf, "%s (Batt %d)", id(current_job_name).c_str(), id(current_batt_id));
+                  id(longest_response_job).publish_state(buf);
+                }
             
             - logger.log:
                 format: "Polling Battery (ID %d) for Discharge Energy (Command 0A)..."
                 args: [ 'id(current_batt_id)' ]
-            - lambda: 'id(response_received) = false;'
+            - lambda: |-
+                id(response_received) = false;
+                id(current_job_start) = millis();
+                id(current_job_name) = "Discharge Energy (Command 0A)";
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -248,11 +317,23 @@ script:
                   lambda: 'return id(response_received);'
                 timeout: 1.5s
             - delay: 50ms
+            - lambda: |-
+                uint32_t duration = millis() - id(current_job_start);
+                float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+                if (duration > current_max) {
+                  id(longest_response_time).publish_state(duration);
+                  char buf[100];
+                  sprintf(buf, "%s (Batt %d)", id(current_job_name).c_str(), id(current_batt_id));
+                  id(longest_response_job).publish_state(buf);
+                }
             
             - lambda: 'id(current_batt_id) += 1;'
             
       - logger.log: "Polling System General View (Command 01)..."
-      - lambda: 'id(response_received) = false;'
+      - lambda: |-
+          id(response_received) = false;
+          id(current_job_start) = millis();
+          id(current_job_name) = "System General View (Command 01)";
       - ble_client.ble_write:
           id: ble
           service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -263,6 +344,15 @@ script:
             lambda: 'return id(response_received);'
           timeout: 1.5s
       - delay: 50ms
+      - lambda: |-
+          uint32_t duration = millis() - id(current_job_start);
+          float current_max = std::isnan(id(longest_response_time).state) ? 0 : id(longest_response_time).state;
+          if (duration > current_max) {
+            id(longest_response_time).publish_state(duration);
+            char buf[100];
+            sprintf(buf, "%s", id(current_job_name).c_str());
+            id(longest_response_job).publish_state(buf);
+          }
 
       - lambda: |-
           id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
@@ -302,6 +392,10 @@ interval:
           }
 
 text_sensor:
+  - platform: template
+    name: "Longest Response Job"
+    id: longest_response_job
+    entity_category: diagnostic
   - platform: template
     name: "System Alarms"
     id: sys_alarms
@@ -795,6 +889,12 @@ text_sensor:
             }
 
 sensor:
+  - platform: template
+    name: "Longest Response Time"
+    id: longest_response_time
+    unit_of_measurement: "ms"
+    entity_category: diagnostic
+    accuracy_decimals: 0
   - platform: wifi_signal
     name: "WiFi Signal Strength"
     update_interval: 10s
