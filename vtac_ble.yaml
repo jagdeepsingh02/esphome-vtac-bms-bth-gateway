@@ -36,6 +36,9 @@ globals:
   - id: slow_actual_execution_time
     type: float
     initial_value: '0'
+  - id: response_received
+    type: bool
+    initial_value: 'false'
 
 number:
   - platform: template
@@ -136,12 +139,17 @@ script:
           id(fast_script_start_time) = millis();
           id(current_batt_id) = 1;
       - logger.log: "Polling System Telemetry (Command 1)..."
+      - lambda: 'id(response_received) = false;'
       - ble_client.ble_write:
           id: ble
           service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
           characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
           value: [0xAB, 0xAB, 0x01, 0x00, 0x00, 0x00, 0x00, 0x1, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A]
-      - delay: 200ms
+      - wait_until:
+          condition:
+            lambda: 'return id(response_received);'
+          timeout: 1.5s
+      - delay: 50ms
       - while:
           condition:
             lambda: 'return id(current_batt_id) <= (id(slave_count).state + 1);'
@@ -149,24 +157,34 @@ script:
             - logger.log:
                 format: "Polling Battery (ID %d) for Telemetry (Command 2)..."
                 args: [ 'id(current_batt_id)' ]
+            - lambda: 'id(response_received) = false;'
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
                 characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
                 value: !lambda |-
                   return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A};
-            - delay: 10ms
+            - wait_until:
+                condition:
+                  lambda: 'return id(response_received);'
+                timeout: 1.5s
+            - delay: 50ms
             
             - logger.log:
                 format: "Polling Battery (ID %d) for Cell Voltages (Command 3)..."
                 args: [ 'id(current_batt_id)' ]
+            - lambda: 'id(response_received) = false;'
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
                 characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
                 value: !lambda |-
                   return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A};
-            - delay: 10ms
+            - wait_until:
+                condition:
+                  lambda: 'return id(response_received);'
+                timeout: 1.5s
+            - delay: 50ms
             
             - lambda: 'id(current_batt_id) += 1;'
             
@@ -186,45 +204,65 @@ script:
             - logger.log:
                 format: "Polling Battery (ID %d) for Temperatures (Command 4)..."
                 args: [ 'id(current_batt_id)' ]
+            - lambda: 'id(response_received) = false;'
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
                 characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
                 value: !lambda |-
                   return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x0D, 0x0A};
-            - delay: 10ms
+            - wait_until:
+                condition:
+                  lambda: 'return id(response_received);'
+                timeout: 1.5s
+            - delay: 50ms
             
             - logger.log:
                 format: "Polling Battery (ID %d) for Charge Energy (Command 9)..."
                 args: [ 'id(current_batt_id)' ]
+            - lambda: 'id(response_received) = false;'
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
                 characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
                 value: !lambda |-
                   return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x15, 0x53, 0x43, 0x52, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A};
-            - delay: 10ms
+            - wait_until:
+                condition:
+                  lambda: 'return id(response_received);'
+                timeout: 1.5s
+            - delay: 50ms
             
             - logger.log:
                 format: "Polling Battery (ID %d) for Discharge Energy (Command 0A)..."
                 args: [ 'id(current_batt_id)' ]
+            - lambda: 'id(response_received) = false;'
             - ble_client.ble_write:
                 id: ble
                 service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
                 characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
                 value: !lambda |-
                   return {0xAB, 0xAB, (uint8_t)id(current_batt_id), 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x15, 0x53, 0x43, 0x52, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A};
-            - delay: 10ms
+            - wait_until:
+                condition:
+                  lambda: 'return id(response_received);'
+                timeout: 1.5s
+            - delay: 50ms
             
             - lambda: 'id(current_batt_id) += 1;'
             
       - logger.log: "Polling System General View (Command 01)..."
+      - lambda: 'id(response_received) = false;'
       - ble_client.ble_write:
           id: ble
           service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
           characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
           value: [0xAB, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A]
-      - delay: 10ms
+      - wait_until:
+          condition:
+            lambda: 'return id(response_received);'
+          timeout: 1.5s
+      - delay: 50ms
 
       - lambda: |-
           id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
@@ -388,6 +426,8 @@ text_sensor:
               
               std::vector<uint8_t> f(rx_buf.begin(), rx_buf.begin() + expected_len);
               rx_buf.erase(rx_buf.begin(), rx_buf.begin() + expected_len);
+              
+              id(response_received) = true;
               
               uint8_t batt_id = f[2];
               uint8_t cmd_code = f[7];
