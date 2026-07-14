@@ -138,12 +138,14 @@ ble_client:
 
 script:
 
-  - id: poll_fast_batteries
+  - id: execute_fast_jobs
     mode: single
     then:
       - lambda: |-
           id(fast_script_start_time) = millis();
           id(current_batt_id) = 1;
+          id(longest_response_time).publish_state(0);
+          id(longest_response_job).publish_state("");
       - logger.log: "Polling System Telemetry (Command 1)..."
       - lambda: |-
           id(response_received) = false;
@@ -233,12 +235,14 @@ script:
       - lambda: |-
           id(fast_actual_execution_time) = (millis() - id(fast_script_start_time)) / 1000.0;
 
-  - id: poll_slow_batteries
+  - id: execute_slow_jobs
     mode: single
     then:
       - lambda: |-
           id(slow_script_start_time) = millis();
           id(current_batt_id) = 1;
+          id(longest_response_time).publish_state(0);
+          id(longest_response_job).publish_state("");
       - while:
           condition:
             lambda: 'return id(current_batt_id) <= (id(slave_count).state + 1);'
@@ -358,9 +362,9 @@ script:
           id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
 
 interval:
-  # Force a deeper disconnect every 5 minutes to prevent the PACE BMS Bluetooth stack from locking up
+  # Force a deeper disconnect every 60 minutes to prevent the PACE BMS Bluetooth stack from locking up
   # We stop the scanner to ensure it stays disconnected for exactly 5 seconds to let the battery breathe
-  - interval: 5min
+  - interval: 60min
     then:
       - if:
           condition:
@@ -376,7 +380,7 @@ interval:
     then:
       - lambda: |-
           // If either script is still running over the air, do nothing and don't count up yet!
-          if (id(poll_fast_batteries).is_running() || id(poll_slow_batteries).is_running()) {
+          if (id(execute_fast_jobs).is_running() || id(execute_slow_jobs).is_running()) {
             return;
           }
           
@@ -385,10 +389,10 @@ interval:
           
           if (id(slow_poll_timer) >= id(slow_poll_interval).state) {
             id(slow_poll_timer) = 0;
-            id(poll_slow_batteries).execute();
+            id(execute_slow_jobs).execute();
           } else if (id(fast_poll_timer) >= id(fast_poll_interval).state) {
             id(fast_poll_timer) = 0;
-            id(poll_fast_batteries).execute();
+            id(execute_fast_jobs).execute();
           }
 
 text_sensor:
