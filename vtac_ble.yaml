@@ -97,6 +97,27 @@ number:
     restore_value: true
     entity_category: config
     
+  - platform: template
+    name: "Energy Poll Interval"
+    id: energy_poll_interval
+    min_value: 1
+    max_value: 24
+    step: 1
+    initial_value: 12
+    optimistic: true
+    entity_category: config
+    unit_of_measurement: "h"
+  - platform: template
+    name: "Watchdog Timeout"
+    id: watchdog_timeout
+    min_value: 1
+    max_value: 60
+    step: 1
+    initial_value: 15
+    optimistic: true
+    entity_category: config
+    unit_of_measurement: "min"
+
 web_server:
   port: 80
   
@@ -149,27 +170,6 @@ ble_client:
             id: battery_connected
             state: OFF
 
-number:
-  - platform: template
-    name: "Energy Poll Interval"
-    id: energy_poll_interval
-    min_value: 1
-    max_value: 24
-    step: 1
-    initial_value: 12
-    optimistic: true
-    entity_category: config
-    unit_of_measurement: "h"
-  - platform: template
-    name: "Watchdog Timeout"
-    id: watchdog_timeout
-    min_value: 1
-    max_value: 60
-    step: 1
-    initial_value: 15
-    optimistic: true
-    entity_category: config
-    unit_of_measurement: "min"
 
 button:
   - platform: restart
