@@ -15,6 +15,12 @@ logger:
   level: DEBUG
 
 globals:
+  - id: energy_poll_timer
+    type: uint32_t
+    initial_value: '43140'
+  - id: last_successful_response_time
+    type: uint32_t
+    initial_value: '0'
   - id: fast_poll_timer
     type: float
     initial_value: '0'
@@ -138,9 +144,37 @@ ble_client:
         - logger.log: "Disconnected from Battery!"
         - script.stop: execute_fast_jobs
         - script.stop: execute_slow_jobs
+        - script.stop: execute_energy_jobs
         - binary_sensor.template.publish:
             id: battery_connected
             state: OFF
+
+number:
+  - platform: template
+    name: "Energy Poll Interval"
+    id: energy_poll_interval
+    min_value: 1
+    max_value: 24
+    step: 1
+    initial_value: 12
+    optimistic: true
+    entity_category: config
+    unit_of_measurement: "h"
+  - platform: template
+    name: "Watchdog Timeout"
+    id: watchdog_timeout
+    min_value: 1
+    max_value: 60
+    step: 1
+    initial_value: 15
+    optimistic: true
+    entity_category: config
+    unit_of_measurement: "min"
+
+button:
+  - platform: restart
+    name: "Restart Gateway"
+    id: restart_gateway
 
 script:
 
@@ -279,6 +313,49 @@ script:
                   id(current_cycle_max_job) = buf;
                 }
             
+            
+            - lambda: 'id(current_batt_id) += 1;'
+            
+      - logger.log: "Polling System General View (Command 01)..."
+      - lambda: |-
+          id(response_received) = false;
+          id(current_job_start) = millis();
+          id(current_job_name) = "System General View (Command 01)";
+      - ble_client.ble_write:
+          id: ble
+          service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+          characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+          value: [0xAB, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A]
+      - wait_until:
+          condition:
+            lambda: 'return id(response_received);'
+          timeout: 1.5s
+      - delay: 50ms
+      - lambda: |-
+          uint32_t duration = millis() - id(current_job_start);
+          if (duration > id(current_cycle_max_time)) {
+            id(current_cycle_max_time) = duration;
+            char buf[100];
+            sprintf(buf, "%s - %dms", id(current_job_name).c_str(), duration);
+            id(current_cycle_max_job) = buf;
+          }
+
+      - lambda: |-
+          id(longest_response_time).publish_state(id(current_cycle_max_time));
+          id(longest_response_job).publish_state(id(current_cycle_max_job));
+          id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
+
+  - id: execute_energy_jobs
+    mode: single
+    then:
+      - lambda: |-
+          id(current_batt_id) = 1;
+          id(current_cycle_max_time) = 0;
+          id(current_cycle_max_job) = "";
+      - while:
+          condition:
+            lambda: 'return id(current_batt_id) <= (id(slave_count).state + 1);'
+          then:
             - logger.log:
                 format: "Polling Battery (ID %d) for Charge Energy (Command 9)..."
                 args: [ 'id(current_batt_id)' ]
@@ -335,34 +412,9 @@ script:
             
             - lambda: 'id(current_batt_id) += 1;'
             
-      - logger.log: "Polling System General View (Command 01)..."
-      - lambda: |-
-          id(response_received) = false;
-          id(current_job_start) = millis();
-          id(current_job_name) = "System General View (Command 01)";
-      - ble_client.ble_write:
-          id: ble
-          service_uuid: '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
-          characteristic_uuid: '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
-          value: [0xAB, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0D, 0x0A]
-      - wait_until:
-          condition:
-            lambda: 'return id(response_received);'
-          timeout: 1.5s
-      - delay: 50ms
-      - lambda: |-
-          uint32_t duration = millis() - id(current_job_start);
-          if (duration > id(current_cycle_max_time)) {
-            id(current_cycle_max_time) = duration;
-            char buf[100];
-            sprintf(buf, "%s - %dms", id(current_job_name).c_str(), duration);
-            id(current_cycle_max_job) = buf;
-          }
-
       - lambda: |-
           id(longest_response_time).publish_state(id(current_cycle_max_time));
           id(longest_response_job).publish_state(id(current_cycle_max_job));
-          id(slow_actual_execution_time) = (millis() - id(slow_script_start_time)) / 1000.0;
 
 interval:
   # Force a deeper disconnect every 60 minutes to prevent the PACE BMS Bluetooth stack from locking up
@@ -382,15 +434,27 @@ interval:
   - interval: 1s
     then:
       - lambda: |-
-          // If either script is still running over the air, do nothing and don't count up yet!
-          if (id(execute_fast_jobs).is_running() || id(execute_slow_jobs).is_running()) {
+          // Watchdog check
+          if (id(battery_connected).state) {
+            if ((millis() - id(last_successful_response_time)) > (id(watchdog_timeout).state * 60000)) {
+              ESP_LOGE("main", "Watchdog triggered! No valid response in %d minutes. Restarting...", (int)id(watchdog_timeout).state);
+              id(restart_gateway).press();
+            }
+          }
+          
+          // If any script is still running over the air, do nothing and don't count up yet!
+          if (id(execute_fast_jobs).is_running() || id(execute_slow_jobs).is_running() || id(execute_energy_jobs).is_running()) {
             return;
           }
           
           id(fast_poll_timer) += 1;
           id(slow_poll_timer) += 1;
+          id(energy_poll_timer) += 1;
           
-          if (id(slow_poll_timer) >= id(slow_poll_interval).state) {
+          if (id(energy_poll_timer) >= (id(energy_poll_interval).state * 3600)) {
+            id(energy_poll_timer) = 0;
+            id(execute_energy_jobs).execute();
+          } else if (id(slow_poll_timer) >= id(slow_poll_interval).state) {
             id(slow_poll_timer) = 0;
             id(execute_slow_jobs).execute();
           } else if (id(fast_poll_timer) >= id(fast_poll_interval).state) {
