@@ -178,6 +178,20 @@ button:
   - platform: restart
     name: "Restart Gateway"
     id: restart_gateway
+    entity_category: config
+  - platform: template
+    name: "Force Poll Energy"
+    id: force_poll_energy
+    entity_category: diagnostic
+    icon: "mdi:battery-sync"
+    on_press:
+      - lambda: |-
+          if (id(battery_connected).state) {
+            id(energy_poll_timer) = (id(energy_poll_interval).state * 3600);
+            ESP_LOGI("main", "Energy poll forced by user.");
+          } else {
+            ESP_LOGW("main", "Cannot force energy poll, battery is not connected.");
+          }
 
 script:
 
