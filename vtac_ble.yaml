@@ -612,6 +612,7 @@ text_sensor:
               rx_buf.erase(rx_buf.begin(), rx_buf.begin() + expected_len);
               
               id(response_received) = true;
+              id(last_successful_response_time) = millis();
               
               uint8_t batt_id = f[2];
               uint8_t cmd_code = f[7];
