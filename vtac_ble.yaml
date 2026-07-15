@@ -105,6 +105,7 @@ number:
     step: 1
     initial_value: 12
     optimistic: true
+    restore_value: true
     entity_category: config
     unit_of_measurement: "h"
   - platform: template
@@ -115,6 +116,7 @@ number:
     step: 1
     initial_value: 15
     optimistic: true
+    restore_value: true
     entity_category: config
     unit_of_measurement: "min"
 
@@ -156,6 +158,7 @@ ble_client:
 # We write directly to the BLE characteristic to ask for data!
     on_connect:
       then:
+        - lambda: 'id(last_successful_response_time) = millis();'
         - logger.log: "Connected! Battery will likely spam 0D config first..."
         - binary_sensor.template.publish:
             id: battery_connected
@@ -436,7 +439,9 @@ interval:
       - lambda: |-
           // Watchdog check
           if (id(battery_connected).state) {
-            if ((millis() - id(last_successful_response_time)) > (id(watchdog_timeout).state * 60000)) {
+            uint32_t elapsed = millis() - id(last_successful_response_time);
+            uint32_t timeout_ms = (uint32_t)(id(watchdog_timeout).state * 60000.0);
+            if (elapsed > timeout_ms) {
               ESP_LOGE("main", "Watchdog triggered! No valid response in %d minutes. Restarting...", (int)id(watchdog_timeout).state);
               id(restart_gateway).press();
             }
