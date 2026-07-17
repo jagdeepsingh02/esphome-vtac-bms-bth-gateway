@@ -451,14 +451,18 @@ interval:
   - interval: 1s
     then:
       - lambda: |-
-          // Watchdog check
-          if (id(battery_connected).state) {
-            uint32_t elapsed = millis() - id(last_successful_response_time);
-            uint32_t timeout_ms = (uint32_t)(id(watchdog_timeout).state * 60000.0);
-            if (elapsed > timeout_ms) {
-              ESP_LOGE("main", "Watchdog triggered! No valid response in %d minutes. Restarting...", (int)id(watchdog_timeout).state);
-              id(restart_gateway).press();
-            }
+          // Watchdog check: ALWAYS check it!
+          // If we haven't received a valid response in X minutes (whether connected or not), RESTART!
+          uint32_t elapsed = millis() - id(last_successful_response_time);
+          uint32_t timeout_ms = (uint32_t)(id(watchdog_timeout).state * 60000.0);
+          if (elapsed > timeout_ms) {
+            ESP_LOGE("main", "Watchdog triggered! No valid response in %d minutes. Restarting...", (int)id(watchdog_timeout).state);
+            id(restart_gateway).press();
+          }
+          
+          // DO NOT run polling scripts if we are not connected!
+          if (!id(battery_connected).state) {
+            return;
           }
           
           // If any script is still running over the air, do nothing and don't count up yet!
