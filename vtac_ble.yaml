@@ -440,7 +440,9 @@ interval:
     then:
       - if:
           condition:
-            lambda: 'return id(ble).connected();'
+            and:
+              - lambda: 'return id(ble).connected();'
+              - lambda: 'return id(enable_60min_breather).state;'
           then:
             - logger.log: "Initiating 5-second BLE breather to clear BMS buffer..."
             - esp32_ble_tracker.stop_scan:
@@ -1869,6 +1871,12 @@ switch:
   - platform: template
     name: "Enable Raw Data Dump"
     id: enable_raw_dumping
+    entity_category: diagnostic
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    name: "Enable 60min Breather"
+    id: enable_60min_breather
     entity_category: diagnostic
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
